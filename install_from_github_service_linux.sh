@@ -15,22 +15,25 @@ SIEM_API_KEY="${SIEM_API_KEY:-strong-api-key}"
 SIEM_HMAC_SECRET="${SIEM_HMAC_SECRET:-strong-hmac-secret}"
 RUN_USER="${RUN_USER:-root}"
 
+MYSQL_HOST="${MYSQL_HOST:-127.0.0.1}"
+MYSQL_PORT="${MYSQL_PORT:-3306}"
+MYSQL_DATABASE="${MYSQL_DATABASE:-siem}"
+MYSQL_USER="${MYSQL_USER:-siem_user}"
+MYSQL_PASSWORD="${MYSQL_PASSWORD:-strong_password}"
+
 usage() {
   cat <<EOF
 Usage:
   sudo bash install_from_github_service_linux.sh manager
   sudo MANAGER_HOST=10.0.0.15 bash install_from_github_service_linux.sh agent
 
-Environment variables:
+Optional environment variables:
   REPO_URL, INSTALL_ROOT
   MANAGER_BRANCH, AGENT_BRANCH
   MANAGER_HOST, MANAGER_PORT, MANAGER_URL
   SIEM_API_KEY, SIEM_HMAC_SECRET
+  MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD
   RUN_USER
-
-Examples:
-  sudo SIEM_API_KEY=mykey SIEM_HMAC_SECRET=mysecret bash install_from_github_service_linux.sh manager
-  sudo MANAGER_URL=http://siem-manager.local:8000/ingest bash install_from_github_service_linux.sh agent
 EOF
 }
 
@@ -48,14 +51,31 @@ need_cmd() {
   }
 }
 
-install_deps() {
-  need_cmd git
-  need_cmd python3
-  need_cmd systemctl
-  python3 -m pip --version >/dev/null 2>&1 || {
-    echo "python3-pip is missing. Install pip for Python 3 first."
+install_pkgs() {
+  need_cmd apt-get
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y git python3 python3-venv python3-pip mariadb-server mariadb-client
+}
+
+ensure_mariadb() {
+  systemctl enable --now mariadb
+  systemctl restart mariadb
+  systemctl is-active --quiet mariadb || {
+    echo "MariaDB failed to start."
     exit 1
   }
+}
+
+setup_mysql_db() {
+  mysql <<EOF
+CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`;
+CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';
+CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'127.0.0.1' IDENTIFIED BY '${MYSQL_PASSWORD}';
+GRANT ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.* TO '${MYSQL_USER}'@'localhost';
+GRANT ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.* TO '${MYSQL_USER}'@'127.0.0.1';
+FLUSH PRIVILEGES;
+EOF
 }
 
 clone_branch() {
@@ -65,9 +85,18 @@ clone_branch() {
   if [ ! -d "$dest/.git" ]; then
     git clone --branch "$branch" "$REPO_URL" "$dest"
   else
+    if [ -f "$dest/.env" ]; then
+      cp "$dest/.env" "$dest/.env.backup"
+    fi
+
     git -C "$dest" fetch --all
     git -C "$dest" checkout "$branch"
-    git -C "$dest" pull
+
+    if ! git -C "$dest" pull; then
+      echo "git pull failed in $dest"
+      echo "Local files may be blocking the update."
+      exit 1
+    fi
   fi
 }
 
@@ -77,6 +106,11 @@ write_manager_env() {
   cat > "$mgr/.env" <<EOF
 SIEM_API_KEY=$SIEM_API_KEY
 SIEM_HMAC_SECRET=$SIEM_HMAC_SECRET
+MYSQL_HOST=$MYSQL_HOST
+MYSQL_PORT=$MYSQL_PORT
+MYSQL_DATABASE=$MYSQL_DATABASE
+MYSQL_USER=$MYSQL_USER
+MYSQL_PASSWORD=$MYSQL_PASSWORD
 EOF
 }
 
@@ -118,7 +152,7 @@ create_manager_service() {
   cat > /etc/systemd/system/advanced-collectors-manager.service <<EOF
 [Unit]
 Description=Advanced Collectors Manager
-After=network-online.target
+After=network-online.target mariadb.service
 Wants=network-online.target
 
 [Service]
@@ -174,6 +208,11 @@ install_manager() {
   local host_ip
 
   mkdir -p "$INSTALL_ROOT"
+
+  install_pkgs
+  ensure_mariadb
+  setup_mysql_db
+
   clone_branch "$MANAGER_BRANCH" "$dest"
 
   python3 -m venv "$dest/.venv"
@@ -189,12 +228,15 @@ install_manager() {
   echo
   echo "Manager installed as service."
   echo "Docs: http://$host_ip:$MANAGER_PORT/docs"
+  echo "MySQL database: $MYSQL_DATABASE"
+  echo "MySQL user: $MYSQL_USER"
 }
 
 install_agent() {
   local dest="$INSTALL_ROOT/agent"
 
   mkdir -p "$INSTALL_ROOT"
+  install_pkgs
   clone_branch "$AGENT_BRANCH" "$dest"
 
   python3 -m venv "$dest/.venv"
@@ -207,10 +249,6 @@ install_agent() {
   echo
   echo "Agent installed as service."
   echo "Current manager URL: $MANAGER_URL"
-  echo "If manager IP changes, rerun:"
-  echo "  sudo MANAGER_HOST=<new-ip> bash $0 agent"
-  echo "or use DNS:"
-  echo "  sudo MANAGER_URL=http://siem-manager.local:$MANAGER_PORT/ingest bash $0 agent"
 }
 
 main() {
@@ -220,7 +258,6 @@ main() {
   }
 
   require_root
-  install_deps
 
   case "$ROLE" in
     manager)
