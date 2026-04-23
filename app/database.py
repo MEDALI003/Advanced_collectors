@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
-from typing import Any
+from contextlib import contextmanager
+import mysql.connector
+from mysql.connector import pooling
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
