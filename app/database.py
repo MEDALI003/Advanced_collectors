@@ -21,7 +21,28 @@ POOL = pooling.MySQLConnectionPool(
     pool_size=5,
     **DB_CONFIG,
 )
+def fetch_recent(table: str, limit: int = 100) -> list[dict]:
+    allowed_tables = {
+        "agents",
+        "metrics",
+        "logs",
+        "services",
+        "file_events",
+        "network_connections",
+        "top_processes",
+    }
 
+    if table not in allowed_tables:
+        raise ValueError(f"Invalid table name: {table}")
+
+    limit = max(1, min(int(limit), 1000))
+
+    with get_conn() as conn:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT %s", (limit,))
+        rows = cur.fetchall()
+        cur.close()
+        return rows
 
 @contextmanager
 def get_conn():
