@@ -1,0 +1,23 @@
+{
+  "manager_url": "http://127.0.0.1:8000/ingest",
+  "api_key": "strong-api-key",
+  "hmac_secret": "strong-hmac-secret",
+  "interval_seconds": 30,
+  "watch_directory": "./watchdir",
+  "log_targets": {
+    "linux": ["ssh", "cron"],
+    "windows": ["Security", "System"],
+    "darwin": ["sshd", "sudo"]
+  },
+  "watch_services": {
+    "linux": ["ssh", "cron"],
+    "windows": ["WinDefend", "EventLog", "Spooler"],
+    "darwin": ["com.openssh.sshd"]
+  },
+  "limits": {
+    "max_file_scan": 5000,
+    "max_network_connections": 100,
+    "top_processes": 10
+  },
+  "tls_verify": true
+}
