@@ -109,7 +109,7 @@ async def ingest(
     if any(len(items) > MAX_ITEMS for items in lists):
         raise HTTPException(status_code=413, detail="Too many items in payload")
 
-    seen_at = datetime.now(timezone.utc).isoformat()
+    seen_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
     client_ip = request.client.host if request.client else "unknown"
     payload.agent.ip = client_ip
 
