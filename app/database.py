@@ -1,18 +1,31 @@
 from __future__ import annotations
 
-import sqlite3
+import os
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Iterable
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "siem.db"
+import mysql.connector
+from mysql.connector import pooling
+
+
+DB_CONFIG = {
+    "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
+    "port": int(os.getenv("MYSQL_PORT", "3306")),
+    "database": os.getenv("MYSQL_DATABASE", "siem"),
+    "user": os.getenv("MYSQL_USER", "siem_user"),
+    "password": os.getenv("MYSQL_PASSWORD", "strong_password"),
+    "autocommit": True,
+}
+
+POOL = pooling.MySQLConnectionPool(
+    pool_name="siem_pool",
+    pool_size=5,
+    **DB_CONFIG,
+)
 
 
 @contextmanager
-def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+def get_conn():
+    conn = POOL.get_connection()
     try:
         yield conn
     finally:
@@ -20,260 +33,262 @@ def get_connection():
 
 
 def init_db() -> None:
-    with get_connection() as conn:
+    with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA foreign_keys=ON")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS agents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hostname TEXT NOT NULL,
-                ip TEXT NOT NULL,
-                os_name TEXT NOT NULL,
-                os_version TEXT NOT NULL,
-                agent_version TEXT NOT NULL,
-                last_seen TEXT NOT NULL,
-                UNIQUE(hostname, ip)
-            )
-            """
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS agents (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            hostname VARCHAR(255) NOT NULL,
+            ip VARCHAR(64) NOT NULL,
+            os_name VARCHAR(128),
+            os_version VARCHAR(255),
+            agent_version VARCHAR(64),
+            last_seen DATETIME(6) NOT NULL,
+            UNIQUE KEY uniq_agent (hostname, ip)
         )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hostname TEXT NOT NULL,
-                ip TEXT NOT NULL,
-                cpu REAL,
-                memory REAL,
-                disk REAL,
-                load_1m REAL,
-                boot_time TEXT,
-                timestamp TEXT NOT NULL
-            )
-            """
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS metrics (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            hostname VARCHAR(255) NOT NULL,
+            ip VARCHAR(64) NOT NULL,
+            cpu DOUBLE,
+            memory DOUBLE,
+            disk DOUBLE,
+            load_1m DOUBLE NULL,
+            boot_time VARCHAR(64) NULL,
+            timestamp DATETIME(6) NOT NULL
         )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hostname TEXT NOT NULL,
-                ip TEXT NOT NULL,
-                source TEXT NOT NULL,
-                service TEXT,
-                level TEXT,
-                message TEXT NOT NULL,
-                timestamp TEXT NOT NULL
-            )
-            """
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            hostname VARCHAR(255) NOT NULL,
+            ip VARCHAR(64) NOT NULL,
+            source VARCHAR(255),
+            service VARCHAR(255),
+            level VARCHAR(64),
+            message TEXT NOT NULL,
+            timestamp DATETIME(6) NOT NULL
         )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS services (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hostname TEXT NOT NULL,
-                ip TEXT NOT NULL,
-                service_name TEXT NOT NULL,
-                active_state TEXT,
-                sub_state TEXT,
-                timestamp TEXT NOT NULL
-            )
-            """
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS services (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            hostname VARCHAR(255) NOT NULL,
+            ip VARCHAR(64) NOT NULL,
+            service_name VARCHAR(255) NOT NULL,
+            active_state VARCHAR(128),
+            sub_state VARCHAR(128),
+            timestamp DATETIME(6) NOT NULL
         )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS file_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hostname TEXT NOT NULL,
-                ip TEXT NOT NULL,
-                path TEXT NOT NULL,
-                action TEXT NOT NULL,
-                timestamp TEXT NOT NULL
-            )
-            """
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS file_events (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            hostname VARCHAR(255) NOT NULL,
+            ip VARCHAR(64) NOT NULL,
+            path TEXT NOT NULL,
+            action VARCHAR(64) NOT NULL,
+            timestamp DATETIME(6) NOT NULL
         )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS network_connections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hostname TEXT NOT NULL,
-                ip TEXT NOT NULL,
-                protocol TEXT NOT NULL,
-                local_address TEXT NOT NULL,
-                remote_address TEXT NOT NULL,
-                status TEXT NOT NULL,
-                pid INTEGER,
-                process_name TEXT,
-                timestamp TEXT NOT NULL
-            )
-            """
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS network_connections (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            hostname VARCHAR(255) NOT NULL,
+            ip VARCHAR(64) NOT NULL,
+            protocol VARCHAR(32),
+            local_address VARCHAR(255),
+            remote_address VARCHAR(255),
+            status VARCHAR(64),
+            pid INT NULL,
+            process_name VARCHAR(255) NULL,
+            timestamp DATETIME(6) NOT NULL
         )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS top_processes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hostname TEXT NOT NULL,
-                ip TEXT NOT NULL,
-                pid INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                username TEXT,
-                cpu_percent REAL,
-                memory_percent REAL,
-                timestamp TEXT NOT NULL
-            )
-            """
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS top_processes (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            hostname VARCHAR(255) NOT NULL,
+            ip VARCHAR(64) NOT NULL,
+            pid INT NULL,
+            name VARCHAR(255),
+            username VARCHAR(255),
+            cpu_percent DOUBLE,
+            memory_percent DOUBLE,
+            timestamp DATETIME(6) NOT NULL
         )
-        conn.commit()
+        """)
+
+        cur.close()
 
 
-def upsert_agent(agent: dict, ip: str, seen_at: str) -> None:
-    with get_connection() as conn:
-        conn.execute(
-            """
+def upsert_agent(agent: dict, ip: str, ts: str) -> None:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
             INSERT INTO agents (hostname, ip, os_name, os_version, agent_version, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(hostname, ip) DO UPDATE SET
-                os_name = excluded.os_name,
-                os_version = excluded.os_version,
-                agent_version = excluded.agent_version,
-                last_seen = excluded.last_seen
-            """,
-            (
-                agent["hostname"],
-                ip,
-                agent["os_name"],
-                agent.get("os_version", "unknown"),
-                agent.get("agent_version", "2.0.0"),
-                seen_at,
-            ),
-        )
-        conn.commit()
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                os_name = VALUES(os_name),
+                os_version = VALUES(os_version),
+                agent_version = VALUES(agent_version),
+                last_seen = VALUES(last_seen)
+        """, (
+            agent["hostname"],
+            ip,
+            agent.get("os_name"),
+            agent.get("os_version"),
+            agent.get("agent_version"),
+            ts,
+        ))
+        cur.close()
 
 
-def _bulk_insert(table_sql: str, rows: Iterable[tuple]) -> None:
-    rows = list(rows)
-    if not rows:
-        return
-    with get_connection() as conn:
-        conn.executemany(table_sql, rows)
-        conn.commit()
-
-
-def insert_metrics(hostname: str, ip: str, metrics: dict) -> None:
-    _bulk_insert(
-        """
-        INSERT INTO metrics (hostname, ip, cpu, memory, disk, load_1m, boot_time, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [(
-            hostname,
+def insert_metrics(agent: dict, ip: str, metrics: dict, ts: str) -> None:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO metrics (hostname, ip, cpu, memory, disk, load_1m, boot_time, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            agent["hostname"],
             ip,
             metrics.get("cpu"),
             metrics.get("memory"),
             metrics.get("disk"),
             metrics.get("load_1m"),
             metrics.get("boot_time"),
-            metrics.get("timestamp"),
-        )],
-    )
+            ts,
+        ))
+        cur.close()
 
 
-def insert_logs(hostname: str, ip: str, logs: list[dict]) -> None:
-    _bulk_insert(
-        """
-        INSERT INTO logs (hostname, ip, source, service, level, message, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        [(
-            hostname,
-            ip,
-            entry.get("source", "unknown"),
-            entry.get("service"),
-            entry.get("level", "info"),
-            entry.get("message", ""),
-            entry.get("timestamp"),
-        ) for entry in logs],
-    )
+def insert_logs(agent: dict, ip: str, logs: list[dict]) -> None:
+    if not logs:
+        return
+    with get_conn() as conn:
+        cur = conn.cursor()
+        rows = [
+            (
+                agent["hostname"],
+                ip,
+                item.get("source"),
+                item.get("service"),
+                item.get("level"),
+                item["message"],
+                item["timestamp"],
+            )
+            for item in logs
+        ]
+        cur.executemany("""
+            INSERT INTO logs (hostname, ip, source, service, level, message, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, rows)
+        cur.close()
 
 
-def insert_services(hostname: str, ip: str, services: list[dict]) -> None:
-    _bulk_insert(
-        """
-        INSERT INTO services (hostname, ip, service_name, active_state, sub_state, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        [(
-            hostname,
-            ip,
-            entry.get("service_name"),
-            entry.get("active_state"),
-            entry.get("sub_state"),
-            entry.get("timestamp"),
-        ) for entry in services],
-    )
+def insert_services(agent: dict, ip: str, services: list[dict]) -> None:
+    if not services:
+        return
+    with get_conn() as conn:
+        cur = conn.cursor()
+        rows = [
+            (
+                agent["hostname"],
+                ip,
+                item["service_name"],
+                item.get("active_state"),
+                item.get("sub_state"),
+                item["timestamp"],
+            )
+            for item in services
+        ]
+        cur.executemany("""
+            INSERT INTO services (hostname, ip, service_name, active_state, sub_state, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, rows)
+        cur.close()
 
 
-def insert_file_events(hostname: str, ip: str, events: list[dict]) -> None:
-    _bulk_insert(
-        """
-        INSERT INTO file_events (hostname, ip, path, action, timestamp)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        [(
-            hostname,
-            ip,
-            entry.get("path"),
-            entry.get("action"),
-            entry.get("timestamp"),
-        ) for entry in events],
-    )
+def insert_file_events(agent: dict, ip: str, events: list[dict]) -> None:
+    if not events:
+        return
+    with get_conn() as conn:
+        cur = conn.cursor()
+        rows = [
+            (
+                agent["hostname"],
+                ip,
+                item["path"],
+                item["action"],
+                item["timestamp"],
+            )
+            for item in events
+        ]
+        cur.executemany("""
+            INSERT INTO file_events (hostname, ip, path, action, timestamp)
+            VALUES (%s, %s, %s, %s, %s)
+        """, rows)
+        cur.close()
 
 
-def insert_network_connections(hostname: str, ip: str, rows: list[dict]) -> None:
-    _bulk_insert(
-        """
-        INSERT INTO network_connections (hostname, ip, protocol, local_address, remote_address, status, pid, process_name, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [(
-            hostname,
-            ip,
-            entry.get("protocol"),
-            entry.get("local_address"),
-            entry.get("remote_address"),
-            entry.get("status"),
-            entry.get("pid"),
-            entry.get("process_name"),
-            entry.get("timestamp"),
-        ) for entry in rows],
-    )
+def insert_network_connections(agent: dict, ip: str, items: list[dict]) -> None:
+    if not items:
+        return
+    with get_conn() as conn:
+        cur = conn.cursor()
+        rows = [
+            (
+                agent["hostname"],
+                ip,
+                item.get("protocol"),
+                item.get("local_address"),
+                item.get("remote_address"),
+                item.get("status"),
+                item.get("pid"),
+                item.get("process_name"),
+                item["timestamp"],
+            )
+            for item in items
+        ]
+        cur.executemany("""
+            INSERT INTO network_connections
+            (hostname, ip, protocol, local_address, remote_address, status, pid, process_name, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, rows)
+        cur.close()
 
 
-def insert_top_processes(hostname: str, ip: str, rows: list[dict]) -> None:
-    _bulk_insert(
-        """
-        INSERT INTO top_processes (hostname, ip, pid, name, username, cpu_percent, memory_percent, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [(
-            hostname,
-            ip,
-            entry.get("pid"),
-            entry.get("name"),
-            entry.get("username"),
-            entry.get("cpu_percent"),
-            entry.get("memory_percent"),
-            entry.get("timestamp"),
-        ) for entry in rows],
-    )
-
-
-def fetch_recent(table: str, limit: int = 100):
-    allow = {
-        "agents", "metrics", "logs", "services", "file_events", "network_connections", "top_processes"
-    }
-    if table not in allow:
-        raise ValueError("Invalid table")
-    with get_connection() as conn:
-        rows = conn.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        return [dict(r) for r in rows]
+def insert_top_processes(agent: dict, ip: str, items: list[dict]) -> None:
+    if not items:
+        return
+    with get_conn() as conn:
+        cur = conn.cursor()
+        rows = [
+            (
+                agent["hostname"],
+                ip,
+                item.get("pid"),
+                item.get("name"),
+                item.get("username"),
+                item.get("cpu_percent"),
+                item.get("memory_percent"),
+                item["timestamp"],
+            )
+            for item in items
+        ]
+        cur.executemany("""
+            INSERT INTO top_processes
+            (hostname, ip, pid, name, username, cpu_percent, memory_percent, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, rows)
+        cur.close()

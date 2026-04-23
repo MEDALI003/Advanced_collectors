@@ -20,18 +20,24 @@ from .database import (
 from .models import IngestPayload
 from .security import verify_hmac
 
+
 API_KEY = os.getenv("SIEM_API_KEY", "change-me")
 HMAC_SECRET = os.getenv("SIEM_HMAC_SECRET", "change-me-too")
 MAX_LOGS = int(os.getenv("SIEM_MAX_LOGS", "500"))
 MAX_ITEMS = int(os.getenv("SIEM_MAX_ITEMS", "250"))
 
 app = FastAPI(title="Cross-OS SIEM Manager", version="2.0.0")
-init_db()
+
+
+@app.on_event("startup")
+def startup() -> None:
+    init_db()
 
 
 def _build_alerts(payload: IngestPayload) -> list[str]:
     alerts: list[str] = []
     hostname = payload.agent.hostname
+
     if payload.metrics.cpu >= 85:
         alerts.append(f"HIGH_CPU on {hostname}: {payload.metrics.cpu}%")
     if payload.metrics.memory >= 90:
@@ -43,7 +49,9 @@ def _build_alerts(payload: IngestPayload) -> list[str]:
     for entry in payload.logs:
         msg = entry.message.lower()
         if any(token in msg for token in suspicious):
-            alerts.append(f"SUSPICIOUS_LOG on {hostname}: {entry.source} / {entry.service or '-'}")
+            alerts.append(
+                f"SUSPICIOUS_LOG on {hostname}: {entry.source} / {entry.service or '-'}"
+            )
             break
 
     for svc in payload.services:
@@ -52,10 +60,14 @@ def _build_alerts(payload: IngestPayload) -> list[str]:
 
     listening_external = [
         c for c in payload.network_connections
-        if c.status.upper() == "LISTEN" and not c.local_address.startswith(("127.", "::1", "localhost"))
+        if c.status.upper() == "LISTEN"
+        and not c.local_address.startswith(("127.", "::1", "localhost"))
     ]
     if len(listening_external) >= 5:
-        alerts.append(f"EXCESSIVE_LISTENING_PORTS on {hostname}: {len(listening_external)} exposed listeners")
+        alerts.append(
+            f"EXCESSIVE_LISTENING_PORTS on {hostname}: {len(listening_external)} exposed listeners"
+        )
+
     return alerts[:20]
 
 
@@ -76,6 +88,7 @@ async def ingest(
     raw_payload = await request.json()
     if not isinstance(raw_payload, dict):
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
     if not x_signature or not verify_hmac(HMAC_SECRET, raw_payload, x_signature):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
@@ -87,7 +100,12 @@ async def ingest(
     if len(payload.logs) > MAX_LOGS:
         raise HTTPException(status_code=413, detail="Too many logs")
 
-    lists = [payload.services, payload.file_events, payload.network_connections, payload.top_processes]
+    lists = [
+        payload.services,
+        payload.file_events,
+        payload.network_connections,
+        payload.top_processes,
+    ]
     if any(len(items) > MAX_ITEMS for items in lists):
         raise HTTPException(status_code=413, detail="Too many items in payload")
 
@@ -96,12 +114,20 @@ async def ingest(
     payload.agent.ip = client_ip
 
     upsert_agent(payload.agent.model_dump(), client_ip, seen_at)
-    insert_metrics(payload.agent.hostname, client_ip, payload.metrics.model_dump())
-    insert_logs(payload.agent.hostname, client_ip, [x.model_dump() for x in payload.logs])
-    insert_services(payload.agent.hostname, client_ip, [x.model_dump() for x in payload.services])
-    insert_file_events(payload.agent.hostname, client_ip, [x.model_dump() for x in payload.file_events])
-    insert_network_connections(payload.agent.hostname, client_ip, [x.model_dump() for x in payload.network_connections])
-    insert_top_processes(payload.agent.hostname, client_ip, [x.model_dump() for x in payload.top_processes])
+    insert_metrics(payload.agent.model_dump(), client_ip, payload.metrics.model_dump(), seen_at)
+    insert_logs(payload.agent.model_dump(), client_ip, [x.model_dump() for x in payload.logs])
+    insert_services(payload.agent.model_dump(), client_ip, [x.model_dump() for x in payload.services])
+    insert_file_events(payload.agent.model_dump(), client_ip, [x.model_dump() for x in payload.file_events])
+    insert_network_connections(
+        payload.agent.model_dump(),
+        client_ip,
+        [x.model_dump() for x in payload.network_connections],
+    )
+    insert_top_processes(
+        payload.agent.model_dump(),
+        client_ip,
+        [x.model_dump() for x in payload.top_processes],
+    )
 
     alerts = _build_alerts(payload)
     return {"status": "stored", "alerts": alerts, "agent": payload.agent.hostname}
