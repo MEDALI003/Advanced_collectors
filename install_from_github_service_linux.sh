@@ -117,29 +117,27 @@ EOF
 write_agent_config() {
   local agent="$1"
 
-  mkdir -p "$agent/watchdir"
-
   cat > "$agent/config.json" <<EOF
 {
   "manager_url": "$MANAGER_URL",
   "api_key": "$SIEM_API_KEY",
   "hmac_secret": "$SIEM_HMAC_SECRET",
-  "interval_seconds": 30,
-  "watch_directory": "./watchdir",
+  "interval_seconds": 2,
+  "watch_directory": "/etc",
   "log_targets": {
-    "linux": ["ssh", "cron"],
-    "windows": ["Security", "System"],
+    "linux": ["ssh", "sshd", "sudo", "cron", "systemd", "kernel", "ufw", "auditd", "apache2", "nginx", "mysql", "docker"],
+    "windows": ["Security", "System", "Application"],
     "darwin": ["sshd", "sudo"]
   },
   "watch_services": {
-    "linux": ["ssh", "cron"],
+    "linux": ["ssh", "sshd", "cron", "rsyslog", "systemd-journald", "ufw", "auditd", "apache2", "nginx", "mysql", "docker"],
     "windows": ["WinDefend", "EventLog", "Spooler"],
     "darwin": ["com.openssh.sshd"]
   },
   "limits": {
-    "max_file_scan": 5000,
-    "max_network_connections": 100,
-    "top_processes": 10
+    "max_file_scan": 20000,
+    "max_network_connections": 300,
+    "top_processes": 25
   },
   "tls_verify": true
 }
