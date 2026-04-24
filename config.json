@@ -3,7 +3,7 @@
   "api_key": "strong-api-key",
   "hmac_secret": "strong-hmac-secret",
   "interval_seconds": 2,
-  "watch_directory": "/",
+  "watch_directory": "/etc",
   "log_targets": {
     "linux": [
       "ssh",
