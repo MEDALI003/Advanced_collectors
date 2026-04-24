@@ -2,22 +2,73 @@
   "manager_url": "http://127.0.0.1:8000/ingest",
   "api_key": "strong-api-key",
   "hmac_secret": "strong-hmac-secret",
-  "interval_seconds": 30,
-  "watch_directory": "./watchdir",
+  "interval_seconds": 2,
+  "watch_directory": "/",
   "log_targets": {
-    "linux": ["ssh", "cron"],
-    "windows": ["Security", "System"],
-    "darwin": ["sshd", "sudo"]
+    "linux": [
+      "ssh",
+      "sshd",
+      "sudo",
+      "cron",
+      "systemd",
+      "kernel",
+      "ufw",
+      "auditd",
+      "apache2",
+      "nginx",
+      "mysql",
+      "docker"
+    ],
+    "windows": [
+      "Security",
+      "System",
+      "Application",
+      "Microsoft-Windows-Windows Defender/Operational",
+      "Microsoft-Windows-PowerShell/Operational",
+      "Microsoft-Windows-Sysmon/Operational"
+    ],
+    "darwin": [
+      "sshd",
+      "sudo",
+      "securityd",
+      "opendirectoryd",
+      "launchd"
+    ]
   },
   "watch_services": {
-    "linux": ["ssh", "cron"],
-    "windows": ["WinDefend", "EventLog", "Spooler"],
-    "darwin": ["com.openssh.sshd"]
+    "linux": [
+      "ssh",
+      "sshd",
+      "cron",
+      "rsyslog",
+      "systemd-journald",
+      "ufw",
+      "auditd",
+      "apache2",
+      "nginx",
+      "mysql",
+      "docker"
+    ],
+    "windows": [
+      "WinDefend",
+      "EventLog",
+      "Spooler",
+      "MpsSvc",
+      "Sysmon64",
+      "W32Time",
+      "LanmanServer",
+      "LanmanWorkstation"
+    ],
+    "darwin": [
+      "com.openssh.sshd",
+      "com.apple.securityd",
+      "com.apple.auditd"
+    ]
   },
   "limits": {
-    "max_file_scan": 5000,
-    "max_network_connections": 100,
-    "top_processes": 10
+    "max_file_scan": 20000,
+    "max_network_connections": 300,
+    "top_processes": 25
   },
   "tls_verify": true
 }
