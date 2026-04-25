@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 
+from .ai_engine import analyze_with_ai
 from .database import (
     fetch_recent,
     init_db,
@@ -26,7 +28,15 @@ HMAC_SECRET = os.getenv("SIEM_HMAC_SECRET", "change-me-too")
 MAX_LOGS = int(os.getenv("SIEM_MAX_LOGS", "500"))
 MAX_ITEMS = int(os.getenv("SIEM_MAX_ITEMS", "250"))
 
-app = FastAPI(title="Cross-OS SIEM Manager", version="2.0.0")
+app = FastAPI(title="CyberScope AI SIEM Manager", version="2.2.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -45,7 +55,16 @@ def _build_alerts(payload: IngestPayload) -> list[str]:
     if payload.metrics.disk >= 90:
         alerts.append(f"HIGH_DISK on {hostname}: {payload.metrics.disk}%")
 
-    suspicious = ("failed password", "authentication failure", "denied", "error", "audit fail")
+    suspicious = (
+        "failed password",
+        "authentication failure",
+        "denied",
+        "error",
+        "audit fail",
+        "invalid user",
+        "access denied",
+    )
+
     for entry in payload.logs:
         msg = entry.message.lower()
         if any(token in msg for token in suspicious):
@@ -55,25 +74,55 @@ def _build_alerts(payload: IngestPayload) -> list[str]:
             break
 
     for svc in payload.services:
-        if svc.active_state.lower() in {"failed", "inactive", "stopped", "stop_pending"}:
+        state = svc.active_state.lower()
+        if state in {"failed", "inactive", "stopped", "stop_pending"}:
             alerts.append(f"SERVICE_ISSUE on {hostname}: {svc.service_name}={svc.active_state}")
 
     listening_external = [
-        c for c in payload.network_connections
+        c
+        for c in payload.network_connections
         if c.status.upper() == "LISTEN"
         and not c.local_address.startswith(("127.", "::1", "localhost"))
     ]
+
     if len(listening_external) >= 5:
         alerts.append(
             f"EXCESSIVE_LISTENING_PORTS on {hostname}: {len(listening_external)} exposed listeners"
         )
+
+    for event in payload.file_events:
+        path = event.path.lower()
+        action = event.action.lower()
+
+        if path.startswith("/etc") and action in {"created", "modified", "deleted"}:
+            alerts.append(f"CRITICAL_FILE_CHANGE on {hostname}: {action} {event.path}")
+            break
 
     return alerts[:20]
 
 
 @app.get("/")
 def home() -> dict[str, str]:
-    return {"status": "manager running", "version": app.version}
+    return {
+        "status": "manager running",
+        "version": app.version,
+        "ai": "enabled",
+    }
+
+
+@app.post("/auth/login")
+def login(data: dict) -> dict[str, str]:
+    username = data.get("username")
+    password = data.get("password")
+
+    if username == "admin" and password == "admin":
+        return {
+            "message": "Login successful",
+            "token": "cyberscope-admin-token",
+            "user": "admin",
+        }
+
+    raise HTTPException(status_code=401, detail="Invalid credentials")
 
 
 @app.post("/ingest")
@@ -106,6 +155,7 @@ async def ingest(
         payload.network_connections,
         payload.top_processes,
     ]
+
     if any(len(items) > MAX_ITEMS for items in lists):
         raise HTTPException(status_code=413, detail="Too many items in payload")
 
@@ -118,19 +168,46 @@ async def ingest(
     insert_logs(payload.agent.model_dump(), client_ip, [x.model_dump() for x in payload.logs])
     insert_services(payload.agent.model_dump(), client_ip, [x.model_dump() for x in payload.services])
     insert_file_events(payload.agent.model_dump(), client_ip, [x.model_dump() for x in payload.file_events])
+
     insert_network_connections(
         payload.agent.model_dump(),
         client_ip,
         [x.model_dump() for x in payload.network_connections],
     )
+
     insert_top_processes(
         payload.agent.model_dump(),
         client_ip,
         [x.model_dump() for x in payload.top_processes],
     )
 
-    alerts = _build_alerts(payload)
-    return {"status": "stored", "alerts": alerts, "agent": payload.agent.hostname}
+    rule_alerts = _build_alerts(payload)
+    ai_analysis = analyze_with_ai(payload, rule_alerts)
+
+    return {
+        "status": "stored",
+        "agent": payload.agent.hostname,
+        "alerts": rule_alerts,
+        "ai_analysis": ai_analysis,
+    }
+
+
+@app.post("/ai/analyze-payload")
+async def analyze_payload(request: Request) -> dict[str, Any]:
+    raw_payload = await request.json()
+
+    try:
+        payload = IngestPayload.model_validate(raw_payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Payload validation failed: {exc}") from exc
+
+    rule_alerts = _build_alerts(payload)
+    ai_analysis = analyze_with_ai(payload, rule_alerts)
+
+    return {
+        "alerts": rule_alerts,
+        "ai_analysis": ai_analysis,
+    }
 
 
 @app.get("/agents")
