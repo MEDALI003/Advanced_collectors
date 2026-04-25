@@ -23,15 +23,13 @@ MYSQL_DATABASE="${MYSQL_DATABASE:-siem}"
 MYSQL_USER="${MYSQL_USER:-siem_user}"
 MYSQL_PASSWORD="${MYSQL_PASSWORD:-strong_password}"
 
-# External Ollama / RAG config
 OLLAMA_HOST="${OLLAMA_HOST:-192.168.153.1}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 OLLAMA_URL="${OLLAMA_URL:-http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/generate}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-llama1:8b}"
 
-CHROMA_PATH="${CHROMA_PATH:-/opt/advanced_collectors/manager/chroma_store}"
-COLLECTION_NAME="${COLLECTION_NAME:-medical_attacks}"
-RAG_TOP_K="${RAG_TOP_K:-5}"
+SIEM_MAX_LOGS="${SIEM_MAX_LOGS:-500}"
+SIEM_MAX_ITEMS="${SIEM_MAX_ITEMS:-250}"
 
 usage() {
   cat <<EOF
@@ -39,17 +37,15 @@ Usage:
   sudo bash install_from_github_service_linux.sh manager
   sudo MANAGER_HOST=10.0.0.15 bash install_from_github_service_linux.sh agent
 
-Optional environment variables:
+Optional variables:
   REPO_URL, INSTALL_ROOT
   MANAGER_BRANCH, AGENT_BRANCH
   MANAGER_HOST, MANAGER_PORT, MANAGER_URL
   SIEM_API_KEY, SIEM_HMAC_SECRET
   MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD
-  RUN_USER
-
-AI/RAG:
   OLLAMA_HOST, OLLAMA_PORT, OLLAMA_URL, OLLAMA_MODEL
-  CHROMA_PATH, COLLECTION_NAME, RAG_TOP_K
+  SIEM_MAX_LOGS, SIEM_MAX_ITEMS
+  RUN_USER
 EOF
 }
 
@@ -140,6 +136,8 @@ write_manager_env() {
   cat > "$mgr/.env" <<EOF
 SIEM_API_KEY=$SIEM_API_KEY
 SIEM_HMAC_SECRET=$SIEM_HMAC_SECRET
+SIEM_MAX_LOGS=$SIEM_MAX_LOGS
+SIEM_MAX_ITEMS=$SIEM_MAX_ITEMS
 
 MYSQL_HOST=$MYSQL_HOST
 MYSQL_PORT=$MYSQL_PORT
@@ -149,10 +147,6 @@ MYSQL_PASSWORD=$MYSQL_PASSWORD
 
 OLLAMA_URL=$OLLAMA_URL
 OLLAMA_MODEL=$OLLAMA_MODEL
-
-CHROMA_PATH=$CHROMA_PATH
-COLLECTION_NAME=$COLLECTION_NAME
-RAG_TOP_K=$RAG_TOP_K
 EOF
 }
 
@@ -198,18 +192,20 @@ install_manager_python_deps() {
 
   "$mgr/.venv/bin/python" -m pip install \
     requests \
-    chromadb \
     mysql-connector-python
 }
 
 test_ollama_connection() {
   echo "[*] Testing Ollama connection: $OLLAMA_URL"
 
-  if curl -s --connect-timeout 3 "${OLLAMA_URL%/api/generate}/api/tags" >/dev/null 2>&1; then
-    echo "[+] Ollama reachable."
+  local base_url
+  base_url="${OLLAMA_URL%/api/generate}"
+
+  if curl -s --connect-timeout 3 "$base_url/api/tags" >/dev/null 2>&1; then
+    echo "[+] Ollama reachable at $base_url"
   else
-    echo "[!] Warning: Ollama is not reachable at ${OLLAMA_URL%/api/generate}"
-    echo "    Manager will still install, but AI/RAG will fail until Ollama is reachable."
+    echo "[!] Warning: Ollama is not reachable at $base_url"
+    echo "    Manager will install, but AI analysis will fail until Ollama is reachable."
   fi
 }
 
@@ -298,7 +294,6 @@ install_manager() {
   echo "MySQL user: $MYSQL_USER"
   echo "Ollama URL: $OLLAMA_URL"
   echo "Ollama model: $OLLAMA_MODEL"
-  echo "Chroma path: $CHROMA_PATH"
 }
 
 install_agent() {
