@@ -2,8 +2,10 @@
 set -euo pipefail
 
 ROLE="${1:-}"
+
 REPO_URL="${REPO_URL:-https://github.com/MEDALI003/Advanced_collectors.git}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/advanced_collectors}"
+
 MANAGER_BRANCH="${MANAGER_BRANCH:-manager}"
 AGENT_BRANCH="${AGENT_BRANCH:-agent}"
 MANAGER_PORT="${MANAGER_PORT:-8000}"
@@ -21,6 +23,16 @@ MYSQL_DATABASE="${MYSQL_DATABASE:-siem}"
 MYSQL_USER="${MYSQL_USER:-siem_user}"
 MYSQL_PASSWORD="${MYSQL_PASSWORD:-strong_password}"
 
+# External Ollama / RAG config
+OLLAMA_HOST="${OLLAMA_HOST:-192.168.153.1}"
+OLLAMA_PORT="${OLLAMA_PORT:-11434}"
+OLLAMA_URL="${OLLAMA_URL:-http://${OLLAMA_HOST}:${OLLAMA_PORT}/api/generate}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-llama1:8b}"
+
+CHROMA_PATH="${CHROMA_PATH:-/opt/advanced_collectors/manager/chroma_store}"
+COLLECTION_NAME="${COLLECTION_NAME:-medical_attacks}"
+RAG_TOP_K="${RAG_TOP_K:-5}"
+
 usage() {
   cat <<EOF
 Usage:
@@ -34,6 +46,10 @@ Optional environment variables:
   SIEM_API_KEY, SIEM_HMAC_SECRET
   MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD
   RUN_USER
+
+AI/RAG:
+  OLLAMA_HOST, OLLAMA_PORT, OLLAMA_URL, OLLAMA_MODEL
+  CHROMA_PATH, COLLECTION_NAME, RAG_TOP_K
 EOF
 }
 
@@ -54,13 +70,22 @@ need_cmd() {
 install_pkgs() {
   need_cmd apt-get
   export DEBIAN_FRONTEND=noninteractive
+
   apt-get update
-  apt-get install -y git python3 python3-venv python3-pip mariadb-server mariadb-client
+  apt-get install -y \
+    git \
+    curl \
+    python3 \
+    python3-venv \
+    python3-pip \
+    mariadb-server \
+    mariadb-client
 }
 
 ensure_mariadb() {
   systemctl enable --now mariadb
   systemctl restart mariadb
+
   systemctl is-active --quiet mariadb || {
     echo "MariaDB failed to start."
     exit 1
@@ -70,10 +95,19 @@ ensure_mariadb() {
 setup_mysql_db() {
   mysql <<EOF
 CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`;
-CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'localhost' IDENTIFIED BY '${MYSQL_PASSWORD}';
-CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'127.0.0.1' IDENTIFIED BY '${MYSQL_PASSWORD}';
-GRANT ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.* TO '${MYSQL_USER}'@'localhost';
-GRANT ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.* TO '${MYSQL_USER}'@'127.0.0.1';
+
+CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'localhost'
+IDENTIFIED BY '${MYSQL_PASSWORD}';
+
+CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'127.0.0.1'
+IDENTIFIED BY '${MYSQL_PASSWORD}';
+
+GRANT ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.*
+TO '${MYSQL_USER}'@'localhost';
+
+GRANT ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.*
+TO '${MYSQL_USER}'@'127.0.0.1';
+
 FLUSH PRIVILEGES;
 EOF
 }
@@ -106,11 +140,19 @@ write_manager_env() {
   cat > "$mgr/.env" <<EOF
 SIEM_API_KEY=$SIEM_API_KEY
 SIEM_HMAC_SECRET=$SIEM_HMAC_SECRET
+
 MYSQL_HOST=$MYSQL_HOST
 MYSQL_PORT=$MYSQL_PORT
 MYSQL_DATABASE=$MYSQL_DATABASE
 MYSQL_USER=$MYSQL_USER
 MYSQL_PASSWORD=$MYSQL_PASSWORD
+
+OLLAMA_URL=$OLLAMA_URL
+OLLAMA_MODEL=$OLLAMA_MODEL
+
+CHROMA_PATH=$CHROMA_PATH
+COLLECTION_NAME=$COLLECTION_NAME
+RAG_TOP_K=$RAG_TOP_K
 EOF
 }
 
@@ -142,6 +184,33 @@ write_agent_config() {
   "tls_verify": true
 }
 EOF
+}
+
+install_manager_python_deps() {
+  local mgr="$1"
+
+  python3 -m venv "$mgr/.venv"
+  "$mgr/.venv/bin/python" -m pip install --upgrade pip
+
+  if [ -f "$mgr/requirements.txt" ]; then
+    "$mgr/.venv/bin/python" -m pip install -r "$mgr/requirements.txt"
+  fi
+
+  "$mgr/.venv/bin/python" -m pip install \
+    requests \
+    chromadb \
+    mysql-connector-python
+}
+
+test_ollama_connection() {
+  echo "[*] Testing Ollama connection: $OLLAMA_URL"
+
+  if curl -s --connect-timeout 3 "${OLLAMA_URL%/api/generate}/api/tags" >/dev/null 2>&1; then
+    echo "[+] Ollama reachable."
+  else
+    echo "[!] Warning: Ollama is not reachable at ${OLLAMA_URL%/api/generate}"
+    echo "    Manager will still install, but AI/RAG will fail until Ollama is reachable."
+  fi
 }
 
 create_manager_service() {
@@ -213,11 +282,10 @@ install_manager() {
 
   clone_branch "$MANAGER_BRANCH" "$dest"
 
-  python3 -m venv "$dest/.venv"
-  "$dest/.venv/bin/python" -m pip install --upgrade pip
-  "$dest/.venv/bin/python" -m pip install -r "$dest/requirements.txt"
+  install_manager_python_deps "$dest"
 
   write_manager_env "$dest"
+  test_ollama_connection
   create_manager_service "$dest"
 
   host_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -228,18 +296,25 @@ install_manager() {
   echo "Docs: http://$host_ip:$MANAGER_PORT/docs"
   echo "MySQL database: $MYSQL_DATABASE"
   echo "MySQL user: $MYSQL_USER"
+  echo "Ollama URL: $OLLAMA_URL"
+  echo "Ollama model: $OLLAMA_MODEL"
+  echo "Chroma path: $CHROMA_PATH"
 }
 
 install_agent() {
   local dest="$INSTALL_ROOT/agent"
 
   mkdir -p "$INSTALL_ROOT"
+
   install_pkgs
   clone_branch "$AGENT_BRANCH" "$dest"
 
   python3 -m venv "$dest/.venv"
   "$dest/.venv/bin/python" -m pip install --upgrade pip
-  "$dest/.venv/bin/python" -m pip install -r "$dest/requirements.txt"
+
+  if [ -f "$dest/requirements.txt" ]; then
+    "$dest/.venv/bin/python" -m pip install -r "$dest/requirements.txt"
+  fi
 
   write_agent_config "$dest"
   create_agent_service "$dest"
